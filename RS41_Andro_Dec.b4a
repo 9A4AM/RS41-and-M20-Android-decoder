@@ -1,0 +1,728 @@
+﻿Build1=Default,RS41_and_m20.andro
+File1=Layout.bal
+FileGroup1=Default Group
+Group=Default Group
+Library1=core
+Library2=javaobject
+Library3=network
+Library4=phone
+Library5=randomaccessfile
+Library6=xui
+ManifestCode='This code will be applied to the manifest file during compilation.~\n~'You do not need to modify it in most cases.~\n~'See this link for for more information: https://www.b4x.com/forum/showthread.php?p=78136~\n~AddManifestText(~\n~<uses-sdk android:minSdkVersion="21" android:targetSdkVersion="35"/>~\n~<supports-screens android:largeScreens="true" ~\n~    android:normalScreens="true" ~\n~    android:smallScreens="true" ~\n~    android:anyDensity="true"/>)~\n~SetApplicationAttribute(android:icon, "@drawable/icon")~\n~SetApplicationAttribute(android:label, "$LABEL$")~\n~CreateResourceFromFile(Macro, Themes.LightTheme)~\n~'End of default text.~\n~AddPermission(android.permission.FOREGROUND_SERVICE)~\n~AddPermission(android.permission.FOREGROUND_SERVICE_MEDIA_PLAYBACK)~\n~AddPermission(android.permission.WAKE_LOCK)~\n~AddPermission(android.permission.POST_NOTIFICATIONS)~\n~SetServiceAttribute(DecSvc, android:foregroundServiceType, "mediaPlayback")
+Module1=AudioOut
+Module2=DecSvc
+Module3=M20
+Module4=RS41
+Module5=RtlSource
+Module6=Starter
+NumberOfFiles=1
+NumberOfLibraries=6
+NumberOfModules=6
+Version=13.4
+@EndOfDesignText@
+'B4A=True
+'Group=Default Group
+'ModulesStructureVersion=1
+'Type=Activity
+'Version=9.8
+'@EndOfDesignText@
+'Main activity - RS41 / M20 dekoder (RTL-SDR preko rtl_tcp drivera)
+'Biblioteke: Core, Network, RandomAccessFile, JavaObject, Phone, RuntimePermissions
+'Moduli:     Main (ovaj), DecSvc (service), RS41 (class), M20 (class), RtlSource (class), AudioOut (class)
+'UI je izgradjen u kodu - nije potreban .bal layout.
+'
+'
+'Hrvatski tekstovi su pisani ASCII oznakama da kodiranje datoteke ne smeta:
+'  {c}=c s kvacicom  {k}=c s ostrim  {s}=s s kvacicom  {z}=z s kvacicom  {d}=d precrtano
+'Funkcija Un() ih pretvara u prave znakove.
+
+#Region Project Attributes
+	#ApplicationLabel: RS41 and M20 Android Decoder 9A4AM
+	#VersionCode: 6
+	#VersionName: 0.6
+	#SupportedOrientations: portrait
+	#CanInstallToExternalStorage: False
+#End Region
+
+#Region Activity Attributes
+	#FullScreen: False
+	#IncludeTitle: True
+#End Region
+
+Sub Process_Globals
+	'objekti su u servisu DecSvc; ovdje su samo reference (BindSvc)
+	Public dec As RS41
+	Public m20 As M20
+	Public src As RtlSource
+	Public aud As AudioOut
+	Private tmrBar As Timer
+	Private tmrHold As Timer         'dugi pritisak na STOP (3 s)
+	Private Const APP_VERSION As String = "0.6"
+	Private Const DRIVER_PORT As Int = 1234
+	Private Const BAR_MIN As Float = -70     'dBFS = prazan bargraf
+	Private Const BAR_MAX As Float = -10     'dBFS = pun bargraf
+	Private lang As String = "hr"    '"hr" ili "en"
+	Private sndMode As Int           '0 = isklj., 1 = bip, 2 = audio
+	Private pendingAuto As Boolean   'automatski start cim servis bude spreman
+	Private holdFired As Boolean
+
+	'indeksi kartica telemetrije
+	Private Const V_SONDE As Int = 0
+	Private Const V_LAT As Int = 1
+	Private Const V_LON As Int = 2
+	Private Const V_ALT As Int = 3
+	Private Const V_SPEED As Int = 4
+	Private Const V_CLIMB As Int = 5
+	Private Const V_HDG As Int = 6
+	Private Const V_UTC As Int = 7
+	Private Const V_SATS As Int = 8
+	Private Const V_DIAG As Int = 9
+End Sub
+
+Sub Globals
+	Private lblVer As Label
+	Private lblCapFreq, lblCapGain, lblCapPpm As Label
+	Private edtFreq, edtGain, edtPpm As EditText
+	Private btnStart, btnStop, btnGeo, btnLang, btnSnd As Button
+	Private lblStatus As Label
+	Private pnlBar, pnlFill As Panel
+	Private lblLevel As Label
+	Private barW As Int
+	Private svInfo As ScrollView
+	Private lblCap(10) As Label
+	Private lblVal(10) As Label
+	Private lastBack As Long
+	Private lblArchive As Label
+End Sub
+
+Sub Activity_Create(FirstTime As Boolean)
+	If FirstTime Then
+		tmrBar.Initialize("tmrBar", 200)
+		tmrHold.Initialize("tmrHold", 3000)
+		If File.Exists(File.DirInternal, "lang.txt") Then
+			lang = File.ReadString(File.DirInternal, "lang.txt").Trim
+			If lang <> "en" Then lang = "hr"
+		End If
+		'Dim rp As RuntimePermissions
+		'rp.CheckAndRequest("android.permission.POST_NOTIFICATIONS")
+	End If
+	KeepScreenOn
+	BuildUi
+	ApplyLanguage
+	'ako servis vec radi (npr. povratak iz notifikacije), ne pokrece se ponovno
+	If DecSvc.Ready = False Then pendingAuto = True
+	StartService(DecSvc)
+End Sub
+
+Sub Activity_Resume
+	tmrBar.Enabled = True
+	BindSvc
+	ShowStatus
+	ShowInfo
+End Sub
+
+Sub Activity_Pause(UserClosed As Boolean)
+	tmrBar.Enabled = False
+	tmrHold.Enabled = False
+	SaveSettings
+	If UserClosed Then
+		SaveTelemetry
+		If DecSvc.Ready Then CallSub(DecSvc, "Shutdown")
+	End If
+End Sub
+
+'Back dvaput za izlaz
+Sub Activity_KeyPress(KeyCode As Int) As Boolean
+	If KeyCode = KeyCodes.KEYCODE_BACK Then
+		If DateTime.Now - lastBack < 2000 Then Return False
+		lastBack = DateTime.Now
+		ToastMessageShow(Tr("Press Back again to exit", "Pritisni Back ponovno za izlaz"), False)
+		Return True
+	End If
+	Return False
+End Sub
+
+'Poziva ga servis kad stigne novi frame / promjena statusa (samo dok je Main vidljiv)
+Sub UiRefresh
+	ShowStatus
+	ShowInfo
+End Sub
+
+'Veze objekata iz servisa. False dok servis nije spreman.
+Private Sub BindSvc As Boolean
+	If DecSvc.Ready = False Then Return False
+	dec = DecSvc.dec
+	m20 = DecSvc.m20
+	src = DecSvc.src
+	aud = DecSvc.aud
+	If aud.Mode <> sndMode Then aud.SetMode(sndMode)
+	Return True
+End Sub
+
+'==================== ekran stalno upaljen ====================
+
+Private Sub KeepScreenOn
+	Dim jo As JavaObject
+	jo.InitializeContext
+	jo.RunMethodJO("getWindow", Null).RunMethod("addFlags", Array As Object(128)) 'FLAG_KEEP_SCREEN_ON
+End Sub
+
+'==================== jezik ====================
+
+Private Sub Un(s As String) As String
+	s = s.Replace("{c}", "" & Chr(0x10D))
+	s = s.Replace("{k}", "" & Chr(0x107))
+	s = s.Replace("{s}", "" & Chr(0x161))
+	s = s.Replace("{z}", "" & Chr(0x17E))
+	s = s.Replace("{d}", "" & Chr(0x111))
+	s = s.Replace("{S}", "" & Chr(0x160))
+	Return s
+End Sub
+
+Private Sub Tr(en As String, hr As String) As String
+	If lang = "hr" Then Return Un(hr)
+	Return en
+End Sub
+
+Private Sub SetStatus(en As String, hr As String)
+	DecSvc.statusEn = en
+	DecSvc.statusHr = hr
+	ShowStatus
+End Sub
+
+Private Sub ShowStatus
+	If lblStatus.IsInitialized = False Then Return
+	If DecSvc.Ready = False Then Return
+	lblStatus.Text = Tr(DecSvc.statusEn, DecSvc.statusHr)
+End Sub
+
+Private Sub ApplyCaptions
+	lblCap(V_SONDE).Text = Tr("Sonde", "Sonda")
+	lblCap(V_LAT).Text = Tr("Latitude", "Geo. {s}irina")
+	lblCap(V_LON).Text = Tr("Longitude", "Geo. duljina")
+	lblCap(V_ALT).Text = Tr("Altitude", "Visina")
+	lblCap(V_SPEED).Text = Tr("Speed", "Brzina")
+	lblCap(V_CLIMB).Text = Tr("Climb rate", "Vertikalna brzina")
+	lblCap(V_HDG).Text = Tr("Heading", "Smjer")
+	lblCap(V_UTC).Text = "UTC"
+	lblCap(V_SATS).Text = Tr("Satellites", "Sateliti")
+	lblCap(V_DIAG).Text = Tr("Diagnostics (frames OK / bad)", "Dijagnostika (frameovi OK / lo{s}i)")
+End Sub
+
+Private Sub UpdateSoundButton
+	Select sndMode
+		Case 0
+			btnSnd.Text = Tr("Sound: Off", "Zvuk: Isklj.")
+		Case 1
+			btnSnd.Text = Tr("Sound: Beep", "Zvuk: Bip")
+		Case 2
+			btnSnd.Text = Tr("Sound: Audio", "Zvuk: Audio")
+	End Select
+End Sub
+
+Private Sub ApplyLanguage
+	lblCapFreq.Text = Tr("Frequency (MHz)", "Frekvencija (MHz)")
+	lblCapGain.Text = Tr("Gain (dB)", "Poja{c}anje (dB)")
+	lblCapPpm.Text = Tr("Correction (ppm)", "Korekcija (ppm)")
+	edtFreq.Hint = Tr("e.g. 403.000", "npr. 403.000")
+	edtGain.Hint = Tr("e.g. 40", "npr. 40")
+	edtPpm.Hint = Tr("e.g. 0", "npr. 0")
+	lblArchive.Text = Tr("Long press STOP open last packet", "Dugi pritisak na STOP otvara zadnji paket")
+	btnStart.Text = "Start"
+	btnStop.Text = "Stop"
+	btnGeo.Text = "Geo App"
+	If lang = "hr" Then btnLang.Text = "EN  [HR]" Else btnLang.Text = "[EN]  HR"
+	UpdateSoundButton
+	ApplyCaptions
+	ShowStatus
+	ShowInfo
+End Sub
+
+Private Sub btnLang_Click
+	If lang = "hr" Then lang = "en" Else lang = "hr"
+	File.WriteString(File.DirInternal, "lang.txt", lang)
+	ApplyLanguage
+End Sub
+
+'==================== zvuk ====================
+
+'Isklj. -> Bip -> Audio (uzivo FM demodulacija)
+Private Sub btnSnd_Click
+	sndMode = (sndMode + 1) Mod 3
+	If BindSvc Then aud.SetMode(sndMode)
+	UpdateSoundButton
+	SaveSettings
+End Sub
+
+'==================== UI ====================
+
+Private Sub MakeCaption(l As Label, Left As Int, Width As Int)
+	l.Initialize("")
+	l.TextColor = Colors.RGB(160, 170, 190)
+	l.TextSize = 12
+	l.Gravity = Bit.Or(Gravity.LEFT, Gravity.BOTTOM)
+	Activity.AddView(l, Left, 24dip, Width, 20dip)
+End Sub
+
+Private Sub StyleEdit(e As EditText, Left As Int, Width As Int)
+	e.Initialize("")
+	e.InputType = e.INPUT_TYPE_DECIMAL_NUMBERS
+	e.SingleLine = True
+	e.TextSize = 20
+	e.TextColor = Colors.White
+	e.HintColor = Colors.RGB(110, 115, 130)
+	e.Gravity = Gravity.CENTER
+	Dim cd As ColorDrawable
+	cd.Initialize2(Colors.RGB(36, 38, 48), 8dip, 1dip, Colors.RGB(90, 100, 130))
+	e.Background = cd
+	Activity.AddView(e, Left, 44dip, Width, 44dip)
+End Sub
+
+'Kartica: okvir sa zaobljenim rubovima, mali natpis gore i veliki podebljani podatak
+Private Sub MakeCard(i As Int, Left As Int, Top As Int, Width As Int, Height As Int, valSize As Int)
+	Dim p As Panel
+	p.Initialize("")
+	Dim cd As ColorDrawable
+	cd.Initialize2(Colors.RGB(32, 36, 48), 10dip, 1dip, Colors.RGB(70, 80, 110))
+	p.Background = cd
+	svInfo.Panel.AddView(p, Left, Top, Width, Height)
+
+	lblCap(i).Initialize("")
+	lblCap(i).TextSize = 12
+	lblCap(i).TextColor = Colors.RGB(150, 160, 185)
+	p.AddView(lblCap(i), 10dip, 4dip, Width - 20dip, 18dip)
+
+	lblVal(i).Initialize("")
+	lblVal(i).TextSize = valSize
+	lblVal(i).TextColor = Colors.RGB(120, 255, 140)
+	lblVal(i).Typeface = Typeface.DEFAULT_BOLD
+	lblVal(i).Gravity = Gravity.CENTER_VERTICAL
+	p.AddView(lblVal(i), 10dip, 22dip, Width - 20dip, Height - 26dip)
+End Sub
+
+Private Sub StyleBigButton(b As Button, normal As Int, pressed As Int)
+	Dim cdN As ColorDrawable
+	Dim cdP As ColorDrawable
+	cdN.Initialize2(normal, 12dip, 0, 0)
+	cdP.Initialize2(pressed, 12dip, 0, 0)
+	Dim sld As StateListDrawable
+	sld.Initialize
+	sld.AddState(sld.State_Pressed, cdP)
+	sld.AddCatchAllState(cdN)
+	b.Background = sld
+	b.TextColor = Colors.Black
+	b.TextSize = 24
+	b.Typeface = Typeface.DEFAULT_BOLD
+End Sub
+
+Private Sub BuildUi
+	Activity.Color = Colors.RGB(20, 20, 24)
+
+	'verzija
+	lblVer.Initialize("")
+	lblVer.Text = "RS41 and M20 decoder by 9A4AM@2026 - v" & APP_VERSION
+	lblVer.TextColor = Colors.RGB(130, 140, 160)
+	lblVer.TextSize = 12
+	lblVer.Gravity = Gravity.CENTER
+	Activity.AddView(lblVer, 0, 2dip, 100%x, 18dip)
+
+	MakeCaption(lblCapFreq, 2%x, 34%x)
+	MakeCaption(lblCapGain, 38%x, 28%x)
+	MakeCaption(lblCapPpm, 68%x, 30%x)
+
+	StyleEdit(edtFreq, 2%x, 34%x)
+	StyleEdit(edtGain, 38%x, 28%x)
+	StyleEdit(edtPpm, 68%x, 30%x)
+	'zadane vrijednosti, pa zadnje spremljene (ako postoje)
+	edtFreq.Text = "403.000"
+	edtGain.Text = "40"
+	edtPpm.Text = "0"
+	LoadSettings
+	MakeCaption(lblArchive, 2%x, 72%x)
+	lblArchive.TextColor = Colors.RGB(100, 180, 255)
+	lblArchive.Top = 192dip
+	'START (svijetlozeleno) i STOP (svijetlocrveno), crna slova, veliki gumbi u jednom redu
+	btnStart.Initialize("btnStart")
+	StyleBigButton(btnStart, Colors.RGB(144, 238, 144), Colors.RGB(100, 200, 100))
+	Activity.AddView(btnStart, 2%x, 96dip, 47%x, 64dip)
+	btnStop.Initialize("btnStop")
+	StyleBigButton(btnStop, Colors.RGB(255, 128, 128), Colors.RGB(220, 90, 90))
+	Activity.AddView(btnStop, 51%x, 96dip, 47%x, 64dip)
+	
+
+	lblStatus.Initialize("")
+	lblStatus.TextColor = Colors.Yellow
+	lblStatus.TextSize = 15
+	Activity.AddView(lblStatus, 2%x, 166dip, 68%x, 50dip)
+
+	btnLang.Initialize("btnLang")
+	btnLang.TextSize = 13
+	Activity.AddView(btnLang, 72%x, 170dip, 26%x, 42dip)
+
+	'bargraf razine signala (lijevo) + gumb za zvuk (desno)
+	pnlBar.Initialize("")
+	Dim cdb As ColorDrawable
+	cdb.Initialize2(Colors.RGB(28, 30, 40), 6dip, 1dip, Colors.RGB(90, 100, 130))
+	pnlBar.Background = cdb
+	Activity.AddView(pnlBar, 2%x, 220dip, 66%x, 34dip)
+	barW = pnlBar.Width - 4dip
+	pnlFill.Initialize("")
+	pnlFill.Color = Colors.RGB(80, 90, 110)
+	pnlBar.AddView(pnlFill, 2dip, 2dip, 1dip, 30dip)
+	lblLevel.Initialize("")
+	lblLevel.TextColor = Colors.White
+	lblLevel.TextSize = 14
+	lblLevel.Typeface = Typeface.DEFAULT_BOLD
+	lblLevel.Gravity = Gravity.CENTER
+	pnlBar.AddView(lblLevel, 0, 0, pnlBar.Width, 34dip)
+
+	btnSnd.Initialize("btnSnd")
+	btnSnd.TextSize = 13
+	Activity.AddView(btnSnd, 70%x, 218dip, 28%x, 38dip)
+
+	'Geo gumb skroz dolje, ispod telemetrije
+	btnGeo.Initialize("btnGeo")
+	btnGeo.TextSize = 18
+	Activity.AddView(btnGeo, 2%x, 100%y - 62dip, 96%x, 54dip)
+
+	'telemetrija u karticama (ScrollView ako ekran nije dovoljno visok)
+	svInfo.Initialize(480dip)
+	Activity.AddView(svInfo, 0, 262dip, 100%x, 100%y - 262dip - 70dip)
+	Dim gap As Int = 8dip
+	Dim cw As Int = (100%x - 3 * gap) / 2
+	Dim fw As Int = 100%x - 2 * gap
+	Dim ch As Int = 62dip
+	Dim y As Int = gap
+	MakeCard(V_SONDE, gap, y, fw, ch, 20)
+	y = y + ch + gap
+	MakeCard(V_LAT, gap, y, cw, ch, 24)
+	MakeCard(V_LON, 2 * gap + cw, y, cw, ch, 24)
+	y = y + ch + gap
+	MakeCard(V_ALT, gap, y, cw, ch, 24)
+	MakeCard(V_SPEED, 2 * gap + cw, y, cw, ch, 24)
+	lblVal(V_SPEED).TextSize = 16
+	y = y + ch + gap
+	MakeCard(V_CLIMB, gap, y, cw, ch, 24)
+	MakeCard(V_HDG, 2 * gap + cw, y, cw, ch, 24)
+	y = y + ch + gap
+	MakeCard(V_UTC, gap, y, cw, ch, 24)
+	MakeCard(V_SATS, 2 * gap + cw, y, cw, ch, 24)
+	y = y + ch + gap
+	MakeCard(V_DIAG, gap, y, fw, 92dip, 14)
+	lblVal(V_DIAG).Typeface = Typeface.MONOSPACE
+	lblVal(V_DIAG).Gravity = Gravity.TOP
+	y = y + 92dip + gap
+	svInfo.Panel.Height = y
+End Sub
+
+Private Sub FreqHz As Int
+	Dim s As String = edtFreq.Text.Replace(",", ".")
+	If IsNumber(s) = False Then Return 403000000
+	Return Round(s * 1000000)
+End Sub
+
+'==================== bargraf signala ====================
+
+'Zelena = nedavno dekodiran ispravan frame, crvena = ADC zasicen (smanji gain), inace siva/zuta prema razini.
+Sub tmrBar_Tick
+	If BindSvc = False Then Return
+	If pendingAuto Then
+		pendingAuto = False
+		StartSequence   'automatski start pri pokretanju aplikacije
+	End If
+	If pnlFill.IsInitialized = False Then Return
+	Dim db As Float = -100
+	Dim clip As Boolean = False
+	If src.Connected Then
+		db = src.SignalDb
+		clip = src.Clipping
+	End If
+	Dim frac As Float = (db - BAR_MIN) / (BAR_MAX - BAR_MIN)
+	If frac < 0 Then frac = 0
+	If frac > 1 Then frac = 1
+	pnlFill.Width = Max(1dip, barW * frac)
+
+	Dim lastOk As Long = Max(dec.LastOk, m20.LastOk)
+	Dim locked As Boolean = (lastOk > 0 And DateTime.Now - lastOk < 3000)
+
+	Dim txt As String
+	If src.Connected Then txt = NumberFormat(db, 1, 0) & " dBFS" Else txt = "-"
+	If clip Then
+		pnlFill.Color = Colors.RGB(220, 60, 60)
+		txt = txt & "  " & Tr("CLIP - lower gain", "PRESNA - smanji gain")
+	Else If locked Then
+		pnlFill.Color = Colors.RGB(40, 170, 70)
+		txt = txt & "   OK"
+	Else If frac > 0.6 Then
+		pnlFill.Color = Colors.RGB(200, 180, 40)
+	Else
+		pnlFill.Color = Colors.RGB(80, 90, 110)
+	End If
+	lblLevel.Text = txt
+End Sub
+
+'==================== pamcenje postavki ====================
+
+Private Sub SaveSettings
+	If edtFreq.IsInitialized = False Then Return
+	Dim m As Map
+	m.Initialize
+	m.Put("freq", edtFreq.Text)
+	m.Put("gain", edtGain.Text)
+	m.Put("ppm", edtPpm.Text)
+	m.Put("snd", sndMode)
+	File.WriteMap(File.DirInternal, "settings.txt", m)
+End Sub
+
+Private Sub LoadSettings
+	If File.Exists(File.DirInternal, "settings.txt") = False Then Return
+	Dim m As Map = File.ReadMap(File.DirInternal, "settings.txt")
+	edtFreq.Text = m.GetDefault("freq", edtFreq.Text)
+	edtGain.Text = m.GetDefault("gain", edtGain.Text)
+	edtPpm.Text = m.GetDefault("ppm", edtPpm.Text)
+	Dim sm As Int = m.GetDefault("snd", 0)
+	If sm >= 0 And sm <= 2 Then sndMode = sm
+End Sub
+
+'==================== zadnja telemetrija (sprema se samo pri izlasku) ====================
+
+Private Sub SaveTelemetry
+	If dec.IsInitialized = False Then Return
+	Dim m As Map
+	m.Initialize
+	If ActiveIsM20 Then
+		If m20.HavePos = False Then Return    'nema pozicije -> ostaje stari zapis
+		m.Put("type", "M20")
+		If m20.HaveId Then m.Put("id", m20.Id) Else m.Put("id", "")
+		m.Put("frame", m20.FrameCnt)
+		m.Put("lat", m20.Lat)
+		m.Put("lon", m20.Lon)
+		m.Put("alt", m20.Alt)
+		m.Put("vh", m20.Vh)
+		m.Put("vv", m20.Vv)
+		m.Put("vd", m20.Vd)
+		m.Put("sats", "-")
+		If m20.HaveTime Then
+			m.Put("utc", NumberFormat(m20.HH, 2, 0) & ":" & NumberFormat(m20.MM, 2, 0) & ":" & NumberFormat(m20.SS, 2, 0))
+		Else
+			m.Put("utc", "-")
+		End If
+	Else
+		If dec.HavePos = False Then Return
+		m.Put("type", "RS41")
+		If dec.HaveId Then m.Put("id", dec.Id) Else m.Put("id", "")
+		m.Put("frame", dec.FrameNo)
+		m.Put("lat", dec.Lat)
+		m.Put("lon", dec.Lon)
+		m.Put("alt", dec.Alt)
+		m.Put("vh", dec.Vh)
+		m.Put("vv", dec.Vv)
+		m.Put("vd", dec.Vd)
+		m.Put("sats", dec.Sats)
+		If dec.HaveTime Then
+			m.Put("utc", NumberFormat(dec.HH, 2, 0) & ":" & NumberFormat(dec.MM, 2, 0) & ":" & NumberFormat(dec.SS, 2, 0))
+		Else
+			m.Put("utc", "-")
+		End If
+	End If
+	m.Put("saved", DateTime.Date(DateTime.Now) & " " & DateTime.Time(DateTime.Now))
+	File.WriteMap(File.DirInternal, "lasttelem.txt", m)
+End Sub
+
+Private Sub ShowSaved
+	If File.Exists(File.DirInternal, "lasttelem.txt") = False Then
+		ToastMessageShow(Tr("No saved telemetry yet", "Nema spremljene telemetrije"), True)
+		Return
+	End If
+	Dim m As Map = File.ReadMap(File.DirInternal, "lasttelem.txt")
+	Dim vh As Double = m.GetDefault("vh", 0)
+	Dim t As String
+	t = m.GetDefault("type", "?") & "  " & m.GetDefault("id", "") & "  #" & m.GetDefault("frame", "") & CRLF
+	t = t & Tr("Saved", "Spremljeno") & ": " & m.GetDefault("saved", "-") & CRLF
+	t = t & "UTC: " & m.GetDefault("utc", "-") & CRLF
+	t = t & Tr("Latitude", "Geo. {s}irina") & ": " & NumberFormat(m.GetDefault("lat", 0), 1, 5) & CRLF
+	t = t & Tr("Longitude", "Geo. duljina") & ": " & NumberFormat(m.GetDefault("lon", 0), 1, 5) & CRLF
+	t = t & Tr("Altitude", "Visina") & ": " & NumberFormat(m.GetDefault("alt", 0), 1, 0) & " m" & CRLF
+	t = t & Tr("Speed", "Brzina") & ": " & NumberFormat(vh, 1, 1) & " m/s (" & NumberFormat(vh * 3.6, 1, 0) & " km/h)" & CRLF
+	t = t & Tr("Climb rate", "Vertikalna brzina") & ": " & NumberFormat(m.GetDefault("vv", 0), 1, 1) & " m/s" & CRLF
+	t = t & Tr("Heading", "Smjer") & ": " & NumberFormat(m.GetDefault("vd", 0), 1, 0) & Chr(176) & CRLF
+	t = t & Tr("Satellites", "Sateliti") & ": " & m.GetDefault("sats", "-")
+	Msgbox2Async(t, Tr("Last telemetry", "Zadnja telemetrija"), "Geo App", "", Tr("Close", "Zatvori"), Null, False)
+	Wait For Msgbox_Result (Result As Int)
+	If Result = DialogResponse.POSITIVE Then
+		Dim nm As String = m.GetDefault("id", "")
+		If nm = "" Then nm = m.GetDefault("type", "Sonde")
+		OpenGeoLink(Round2(m.GetDefault("lat", 0), 5), Round2(m.GetDefault("lon", 0), 5), nm)
+	End If
+End Sub
+
+'==================== start / stop ====================
+
+Private Sub PushParams
+	DecSvc.Freq = FreqHz
+	Dim g As Double = 40
+	If IsNumber(edtGain.Text) Then g = edtGain.Text
+	DecSvc.GainDb = g
+	Dim ppm As Int = 0
+	If IsNumber(edtPpm.Text) Then ppm = edtPpm.Text
+	DecSvc.Ppm = ppm
+End Sub
+
+'Start: ako je SDR vec spojen, samo ga ponovno postavi (gain, ppm, nova frekvencija).
+'Ako nije, pokrece driver i servis se spaja (s ponavljanjem dok port ne odgovori).
+Private Sub btnStart_Click
+	SaveSettings
+	If BindSvc = False Then Return
+	If src.Connected Then
+		PushParams
+		CallSub(DecSvc, "ApplySettings")
+	Else
+		StartSequence
+	End If
+End Sub
+
+Private Sub btnStop_Click
+	'nakon dugog pritiska (prikaz spremljene telemetrije) otpustanje ne smije zaustaviti dekodiranje
+	If holdFired Then
+		holdFired = False
+		Return
+	End If
+	If DecSvc.Ready Then CallSub(DecSvc, "StopDec")
+End Sub
+
+'Dugi pritisak na STOP (3 s) -> zadnja spremljena telemetrija
+Private Sub btnStop_Down
+	holdFired = False
+	tmrHold.Enabled = True
+End Sub
+
+Private Sub btnStop_Up
+	tmrHold.Enabled = False
+End Sub
+
+Sub tmrHold_Tick
+	tmrHold.Enabled = False
+	holdFired = True
+	Dim v As PhoneVibrate
+	v.Vibrate(80)
+	ShowSaved
+End Sub
+
+Private Sub StartSequence
+	If BindSvc = False Then Return
+	PushParams
+	'Isti iqsrc:// intent kao i prije: driver trazi USB dozvolu i otvara port
+	'(288 kS/s, centralna frekvencija = f + 72 kHz)
+	Dim i As Intent
+	i.Initialize(i.ACTION_VIEW, "iqsrc://-a 127.0.0.1 -p " & DRIVER_PORT & " -f " & (FreqHz + 72000) & " -s 288000")
+	Try
+		StartActivity(i)
+	Catch
+		SetStatus("Driver app not found", "Driver aplikacija nije prona{d}ena")
+		Return
+	End Try
+	CallSub(DecSvc, "BeginConnect")
+End Sub
+
+'Aktivna sonda = ona ciji je zadnji ispravni frame noviji (automatsko prepoznavanje)
+Private Sub ActiveIsM20 As Boolean
+	Return m20.LastOk > dec.LastOk
+End Sub
+
+'==================== Geo aplikacija ====================
+
+Private Sub OpenGeoLink(la As String, lo As String, name As String)
+	Dim i As Intent
+	i.Initialize(i.ACTION_VIEW, "geo:" & la & "," & lo & "?q=" & la & "," & lo & "(" & name.Replace(" ", "_") & ")")
+	Try
+		StartActivity(i)
+	Catch
+		ToastMessageShow(Tr("No app found for geo links", "Nema aplikacije za geo poveznice"), True)
+	End Try
+End Sub
+
+Private Sub btnGeo_Click
+	If BindSvc = False Then Return
+	Dim isM As Boolean = ActiveIsM20
+	Dim hasPos As Boolean
+	Dim latV, lonV As Double
+	Dim name As String = "Sonde"
+	If isM Then
+		hasPos = m20.HavePos
+		latV = m20.Lat : lonV = m20.Lon
+		If m20.HaveId Then name = "M20 " & m20.Id
+	Else
+		hasPos = dec.HavePos
+		latV = dec.Lat : lonV = dec.Lon
+		If dec.HaveId Then name = dec.Id
+	End If
+	If hasPos = False Then
+		ToastMessageShow(Tr("No position yet", "Jo{s} nema pozicije"), False)
+		Return
+	End If
+	OpenGeoLink(Round2(latV, 5), Round2(lonV, 5), name)
+End Sub
+
+'==================== prikaz telemetrije ====================
+
+Private Sub ShowInfo
+	If svInfo.IsInitialized = False Then Return
+	If lblVal(V_SONDE).IsInitialized = False Then Return
+	If dec.IsInitialized = False Then Return
+	Dim isM As Boolean = ActiveIsM20
+	Dim sonde, lat, lon, alt, spd, clb, hdg, utc, sats As String
+	sonde = "-" : lat = "-" : lon = "-" : alt = "-" : spd = "-"
+	clb = "-" : hdg = "-" : utc = "-" : sats = "-"
+	
+	If isM Then
+		sonde = "M20"
+		If m20.HaveId Then sonde = "M20  " & m20.Id & "  #" & m20.FrameCnt
+		If m20.HavePos Then
+			lat = NumberFormat(m20.Lat, 1, 5)
+			lon = NumberFormat(m20.Lon, 1, 5)
+			alt = NumberFormat(m20.Alt, 1, 0) & " m"
+			spd = NumberFormat(m20.Vh, 1, 1) & " m/s (" & NumberFormat(m20.Vh * 3.6, 1, 0) & " km/h)"
+			clb = NumberFormat(m20.Vv, 1, 1) & " m/s"
+			hdg = NumberFormat(m20.Vd, 1, 0) & Chr(176)
+		End If
+		If m20.HaveTime Then
+			utc = NumberFormat(m20.HH, 2, 0) & ":" & NumberFormat(m20.MM, 2, 0) & ":" & NumberFormat(m20.SS, 2, 0)
+		End If
+	Else
+		If dec.HaveId Then sonde = "RS41  " & dec.Id & "  #" & dec.FrameNo
+		If dec.HavePos Then
+			lat = NumberFormat(dec.Lat, 1, 5)
+			lon = NumberFormat(dec.Lon, 1, 5)
+			alt = NumberFormat(dec.Alt, 1, 0) & " m"
+			spd = NumberFormat(dec.Vh, 1, 1) & " m/s (" & NumberFormat(dec.Vh * 3.6, 1, 0) & " km/h)"
+			clb = NumberFormat(dec.Vv, 1, 1) & " m/s"
+			hdg = NumberFormat(dec.Vd, 1, 0) & Chr(176)
+			sats = dec.Sats
+		End If
+		If dec.HaveTime Then
+			utc = NumberFormat(dec.HH, 2, 0) & ":" & NumberFormat(dec.MM, 2, 0) & ":" & NumberFormat(dec.SS, 2, 0)
+		End If
+	End If
+	
+	Dim diag As String
+	diag = "RS41  " & dec.FramesOk & " / " & dec.FramesBad & "    M20  " & m20.FramesOk & " / " & m20.FramesBad & CRLF
+	If isM Then
+		diag = diag & "Eye " & NumberFormat(m20.Eye, 1, 2)
+	Else
+		diag = diag & "Eye " & NumberFormat(dec.Eye, 1, 2) & "   RS " & dec.RsFixed & "   blk " & dec.BlkOk
+		If dec.Encrypted Then
+			diag = diag & CRLF & Tr("RS41-SGM: encrypted, position not readable", "RS41-SGM: {s}ifrirano, pozicija nije {c}itljiva")
+		End If
+	End If
+	
+	lblVal(V_SONDE).Text = sonde
+	lblVal(V_LAT).Text = lat
+	lblVal(V_LON).Text = lon
+	lblVal(V_ALT).Text = alt
+	lblVal(V_SPEED).Text = spd
+	lblVal(V_CLIMB).Text = clb
+	lblVal(V_HDG).Text = hdg
+	lblVal(V_UTC).Text = utc
+	lblVal(V_SATS).Text = sats
+	lblVal(V_DIAG).Text = diag
+End Sub
