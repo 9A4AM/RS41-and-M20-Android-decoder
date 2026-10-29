@@ -43,7 +43,7 @@ This program is free software: you can redistribute it and/or modify it under th
 
 ## Credits
 - RS41 and M20 decoding is based on the radiosonde decoders by **rs1729**, https://github.com/rs1729/RS (GPL-3.0).
-- The RS41 class is a port of `rs41.c` from M5-SDR (<URL>).
+- The RS41 class is a port of `rs41.c` from M5-SDR (https://github.com/9a3zi/M5-SDR).
 - Built with B4A by Anywhere Software.
 - Parts of the code were written with the help of an AI assistant and reviewed by the author.
 - "RS41", "M20", "Vaisala" and "Meteomodem" are used only to name the supported sonde types. This project is not affiliated with those companies.
