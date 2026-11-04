@@ -38,8 +38,8 @@ Version=13.4
 
 #Region Project Attributes
 	#ApplicationLabel: RS41 and M20 Android Decoder 9A4AM
-	#VersionCode: 6
-	#VersionName: 0.6
+	#VersionCode: 7
+	#VersionName: 0.7
 	#SupportedOrientations: portrait
 	#CanInstallToExternalStorage: False
 #End Region
@@ -57,7 +57,7 @@ Sub Process_Globals
 	Public aud As AudioOut
 	Private tmrBar As Timer
 	Private tmrHold As Timer         'dugi pritisak na STOP (3 s)
-	Private Const APP_VERSION As String = "0.6"
+	Private Const APP_VERSION As String = "0.7"
 	Private Const DRIVER_PORT As Int = 1234
 	Private Const BAR_MIN As Float = -70     'dBFS = prazan bargraf
 	Private Const BAR_MAX As Float = -10     'dBFS = pun bargraf
@@ -65,6 +65,7 @@ Sub Process_Globals
 	Private sndMode As Int           '0 = isklj., 1 = bip, 2 = audio
 	Private pendingAuto As Boolean   'automatski start cim servis bude spreman
 	Private holdFired As Boolean
+	Private curLat, curLon As Double 'zadnja procitana pozicija aktivne sonde (HasLatLon)
 
 	'indeksi kartica telemetrije
 	Private Const V_SONDE As Int = 0
@@ -287,12 +288,14 @@ Private Sub MakeCard(i As Int, Left As Int, Top As Int, Width As Int, Height As 
 	p.Background = cd
 	svInfo.Panel.AddView(p, Left, Top, Width, Height)
 
-	lblCap(i).Initialize("")
+	lblCap(i).Initialize("lblCard")
+	lblCap(i).Tag = i
 	lblCap(i).TextSize = 12
 	lblCap(i).TextColor = Colors.RGB(150, 160, 185)
 	p.AddView(lblCap(i), 10dip, 4dip, Width - 20dip, 18dip)
 
-	lblVal(i).Initialize("")
+	lblVal(i).Initialize("lblCard")
+	lblVal(i).Tag = i
 	lblVal(i).TextSize = valSize
 	lblVal(i).TextColor = Colors.RGB(120, 255, 140)
 	lblVal(i).Typeface = Typeface.DEFAULT_BOLD
@@ -547,12 +550,17 @@ Private Sub ShowSaved
 	t = t & Tr("Climb rate", "Vertikalna brzina") & ": " & NumberFormat(m.GetDefault("vv", 0), 1, 1) & " m/s" & CRLF
 	t = t & Tr("Heading", "Smjer") & ": " & NumberFormat(m.GetDefault("vd", 0), 1, 0) & Chr(176) & CRLF
 	t = t & Tr("Satellites", "Sateliti") & ": " & m.GetDefault("sats", "-")
-	Msgbox2Async(t, Tr("Last telemetry", "Zadnja telemetrija"), "Geo App", "", Tr("Close", "Zatvori"), Null, False)
+	'Positive = Geo App, Cancel (srednji) = Copy, Negative = Close
+	Msgbox2Async(t, Tr("Last telemetry", "Zadnja telemetrija"), "Geo App", Tr("Copy coordinate", "Kopiraj koordinate"), Tr("Close", "Zatvori"), Null, False)
 	Wait For Msgbox_Result (Result As Int)
+	Dim nm As String = m.GetDefault("id", "")
+	If nm = "" Then nm = m.GetDefault("type", "Sonde")
 	If Result = DialogResponse.POSITIVE Then
-		Dim nm As String = m.GetDefault("id", "")
-		If nm = "" Then nm = m.GetDefault("type", "Sonde")
 		OpenGeoLink(Round2(m.GetDefault("lat", 0), 5), Round2(m.GetDefault("lon", 0), 5), nm)
+	Else If Result = DialogResponse.CANCEL Then
+		Dim la As Double = m.GetDefault("lat", 0)
+		Dim lo As Double = m.GetDefault("lon", 0)
+		CopyText(FmtCoord(la) & "," & FmtCoord(lo), Tr("Copied", "Kopirano"))
 	End If
 End Sub
 
@@ -587,6 +595,7 @@ Private Sub btnStop_Click
 		holdFired = False
 		Return
 	End If
+	If BindSvc Then SaveTelemetry   'spremi zadnju poziciju prije zaustavljanja
 	If DecSvc.Ready Then CallSub(DecSvc, "StopDec")
 End Sub
 
@@ -627,6 +636,70 @@ End Sub
 'Aktivna sonda = ona ciji je zadnji ispravni frame noviji (automatsko prepoznavanje)
 Private Sub ActiveIsM20 As Boolean
 	Return m20.LastOk > dec.LastOk
+End Sub
+
+'==================== kopiranje u meduspremnik ====================
+
+Private Sub CopyText(txt As String, msg As String)
+	Try
+		Dim ctx As JavaObject
+		ctx.InitializeContext
+		Dim cm As JavaObject = ctx.RunMethod("getSystemService", Array As Object("clipboard"))
+		Dim clipData As JavaObject
+		clipData.InitializeStatic("android.content.ClipData")
+		Dim clip As JavaObject = clipData.RunMethod("newPlainText", Array As Object("coords", txt))
+		cm.RunMethod("setPrimaryClip", Array As Object(clip))
+		Dim v As PhoneVibrate
+		v.Vibrate(40)
+		ToastMessageShow(msg & ": " & txt, False)
+	Catch
+		ToastMessageShow(Tr("Copy failed", "Kopiranje nije uspjelo"), False)
+	End Try
+End Sub
+
+'Format s tockom kao decimalnim separatorom, neovisno o jeziku telefona
+Private Sub FmtCoord(v As Double) As String
+	Return NumberFormat(v, 1, 5).Replace(",", ".")
+End Sub
+
+'Puni curLat/curLon pozicijom aktivne sonde. False ako pozicije nema.
+Private Sub HasLatLon As Boolean
+	If BindSvc = False Then Return False
+	If ActiveIsM20 Then
+		If m20.HavePos = False Then Return False
+		curLat = m20.Lat
+		curLon = m20.Lon
+	Else
+		If dec.HavePos = False Then Return False
+		curLat = dec.Lat
+		curLon = dec.Lon
+	End If
+	Return True
+End Sub
+
+'Dugi pritisak na karticu Latitude / Longitude (natpis ili vrijednost)
+Private Sub lblCard_LongClick
+	Dim l As Label = Sender
+	Dim idx As Int = l.Tag
+	If idx <> V_LAT And idx <> V_LON Then Return
+	If HasLatLon = False Then
+		ToastMessageShow(Tr("No position yet", "Jo{s} nema pozicije"), False)
+		Return
+	End If
+	If idx = V_LAT Then
+		CopyText(FmtCoord(curLat), Tr("Copied", "Kopirano"))
+	Else
+		CopyText(FmtCoord(curLon), Tr("Copied", "Kopirano"))
+	End If
+End Sub
+
+'Dugi pritisak na Geo App -> "lat,lon"
+Private Sub btnGeo_LongClick
+	If HasLatLon = False Then
+		ToastMessageShow(Tr("No position yet", "Jo{s} nema pozicije"), False)
+		Return
+	End If
+	CopyText(FmtCoord(curLat) & "," & FmtCoord(curLon), Tr("Copied", "Kopirano"))
 End Sub
 
 '==================== Geo aplikacija ====================
