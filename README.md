@@ -3,6 +3,7 @@
 RS41 and M20 radiosonde decoder for Android, written in pure B4A (Basic4Android).
 Receive only. No data is uploaded anywhere.
 
+<img width="1220" height="2712" alt="1000036929" src="https://github.com/user-attachments/assets/eb46d8ea-fbcc-41a2-ac52-ca9bba4c0154" />
 ![Screen1](https://github.com/user-attachments/assets/7a13a4d7-2f06-46e4-95b1-4d21bab166e4)
 <img width="1220" height="2712" alt="Screen3" src="https://github.com/user-attachments/assets/92cbd3bd-d989-455e-b1f4-3aebcc9efd0b" />
 
