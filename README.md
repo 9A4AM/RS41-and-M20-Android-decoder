@@ -4,7 +4,8 @@ RS41 and M20 radiosonde decoder for Android, written in pure B4A (Basic4Android)
 Receive only. No data is uploaded anywhere.
 
 ![Screen1](https://github.com/user-attachments/assets/7a13a4d7-2f06-46e4-95b1-4d21bab166e4)
-![Screen2](https://github.com/user-attachments/assets/32ee4e5b-ad1f-4938-8057-a7b79c5e13f3)
+<img width="1220" height="2712" alt="Screen3" src="https://github.com/user-attachments/assets/92cbd3bd-d989-455e-b1f4-3aebcc9efd0b" />
+
 
 ## Features
 - Decodes Vaisala **RS41** and Meteomodem **M20**; the sonde type is detected automatically after the app starts.
