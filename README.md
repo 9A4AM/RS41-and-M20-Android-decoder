@@ -15,6 +15,7 @@ Receive only. No data is uploaded anywhere.
 - Press **Back** twice to exit, so you do not close the app by accident.
 - The last received telemetry is saved when the app is closed. **Long press Stop** (about 3 s) to view it.
 - Languages: English and Croatian.
+- Long pressing the Latitude or Longitude field copies its content to the clipboard, while long pressing the GeoApp button copies the coordinates in the 45.76765,16.76632 format to the clipboard. The same applies to "Copy Coordinate" for a saved position. Added saving of the last received position (if available) upon clicking Stop (previously only on exiting the app by pressing Back twice).
 
 ## Requirements
 - Android phone with USB OTG
